@@ -1,0 +1,1316 @@
+import customtkinter as ctk
+from tkinter import ttk, messagebox, filedialog, Toplevel
+import sqlite3
+from tkcalendar import Calendar
+from datetime import datetime
+from PIL import Image, ImageTk
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfgen import canvas
+from reportlab.lib.units import inch
+import os
+import textwrap
+import webbrowser
+import sys
+import csv
+
+# Configuración de CustomTkinter (apariencia moderna)
+ctk.set_appearance_mode("Light")
+ctk.set_default_color_theme("dark-blue")
+
+# =============================================================================
+# Funciones de Base de Datos
+# =============================================================================
+def crear_base_datos():
+    with sqlite3.connect('historia_clinica.db') as conn:
+        c = conn.cursor()
+        # Tabla de pacientes
+        c.execute('''CREATE TABLE IF NOT EXISTS pacientes (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        nombre TEXT NOT NULL,
+                        tipo_documento TEXT NOT NULL,
+                        numero_documento TEXT NOT NULL,
+                        edad INTEGER NOT NULL,
+                        genero TEXT NOT NULL,
+                        celular TEXT NOT NULL,
+                        diagnostico TEXT NOT NULL,
+                        tratamiento TEXT NOT NULL,
+                        acudiente TEXT,
+                        estado_terapia TEXT,
+                        consentimiento TEXT,
+                        antecedentes_clinicos TEXT,
+                        antecedentes_familiares TEXT
+                    )''')
+        # Tabla de citas
+        c.execute('''CREATE TABLE IF NOT EXISTS citas (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        fecha TEXT NOT NULL,
+                        paciente TEXT NOT NULL,
+                        celular TEXT NOT NULL
+                    )''')
+        # Tabla de sesiones
+        c.execute('''CREATE TABLE IF NOT EXISTS sesiones (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        paciente_id INTEGER NOT NULL,
+                        fecha TEXT NOT NULL,
+                        asunto TEXT NOT NULL,
+                        evolucion TEXT NOT NULL,
+                        FOREIGN KEY (paciente_id) REFERENCES pacientes (id)
+                    )''')
+        # Tabla para el perfil profesional (incluye datos profesionales y datos de la IPS)
+        c.execute('''CREATE TABLE IF NOT EXISTS perfil (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        nombre TEXT,
+                        tarjeta_profesional TEXT,
+                        especializacion TEXT,
+                        sello_profesional TEXT,
+                        firma_digital TEXT,
+                        ips_nombre TEXT,
+                        ips_nit TEXT,
+                        ips_direccion TEXT,
+                        ips_tel TEXT,
+                        ips_correo TEXT
+                    )''')
+        conn.commit()
+
+def actualizar_estructura_citas():
+    with sqlite3.connect('historia_clinica.db') as conn:
+        c = conn.cursor()
+        c.execute("PRAGMA table_info(citas)")
+        columnas = [info[1] for info in c.fetchall()]
+        if "estado" not in columnas:
+            try:
+                c.execute("ALTER TABLE citas ADD COLUMN estado TEXT NOT NULL DEFAULT 'Agendada'")
+                conn.commit()
+                print("Columna 'estado' agregada exitosamente.")
+            except sqlite3.OperationalError as e:
+                print("Error al agregar la columna 'estado':", e)
+
+def actualizar_estructura_pacientes_antecedentes():
+    with sqlite3.connect('historia_clinica.db') as conn:
+        c = conn.cursor()
+        c.execute("PRAGMA table_info(pacientes)")
+        columnas = [info[1] for info in c.fetchall()]
+        if "antecedentes_clinicos" not in columnas:
+            try:
+                c.execute("ALTER TABLE pacientes ADD COLUMN antecedentes_clinicos TEXT")
+                conn.commit()
+                print("Columna 'antecedentes_clinicos' agregada exitosamente.")
+            except sqlite3.OperationalError as e:
+                print("Error al agregar la columna 'antecedentes_clinicos':", e)
+        if "antecedentes_familiares" not in columnas:
+            try:
+                c.execute("ALTER TABLE pacientes ADD COLUMN antecedentes_familiares TEXT")
+                conn.commit()
+                print("Columna 'antecedentes_familiares' agregada exitosamente.")
+            except sqlite3.OperationalError as e:
+                print("Error al agregar la columna 'antecedentes_familiares':", e)
+
+# =============================================================================
+# Funciones para PDF/CSV y Utilidades
+# =============================================================================
+def validar_campos_paciente(nombres_apellidos, tipo_documento, numero_documento, edad, genero, celular, diagnostico, tratamiento, estado_terapia):
+    return all([nombres_apellidos, tipo_documento, numero_documento, edad, genero, celular, diagnostico, tratamiento, estado_terapia])
+
+def draw_header(c_pdf, width, height, margin):
+    page_num = c_pdf.getPageNumber()
+    c_pdf.setFont("Times-Roman", 12)
+    running_head = "Running head: Informe Psicológico"
+    c_pdf.drawString(margin, height - margin + 20, running_head)
+    c_pdf.drawRightString(width - margin, height - margin + 20, f"Page {page_num}")
+
+def generar_historia_clinica():
+    item = tree.focus()
+    if not item:
+        messagebox.showwarning("Error", "Seleccione un paciente para generar el informe.")
+        return
+    id_paciente = tree.item(item)['values'][0]
+    with sqlite3.connect('historia_clinica.db') as conn:
+        c = conn.cursor()
+        c.execute("SELECT * FROM pacientes WHERE id = ?", (id_paciente,))
+        paciente = c.fetchone()
+        c.execute("SELECT * FROM sesiones WHERE paciente_id = ?", (id_paciente,))
+        sesiones = c.fetchall()
+    if not paciente:
+        messagebox.showwarning("Advertencia", "No se encontró el paciente.")
+        return
+
+    pdf_file = f"Informe_Psicologico_{paciente[1].replace(' ', '_')}.pdf"
+    c_pdf = canvas.Canvas(pdf_file, pagesize=letter)
+    width, height = letter
+    margin = 72  # 1 pulgada
+    draw_header(c_pdf, width, height, margin)
+
+    # Logo
+    logo_path = "logo_de_psipam.jpg"
+    logo_height = 80
+    if os.path.exists(logo_path):
+        try:
+            c_pdf.drawImage(logo_path, margin, height - margin - logo_height, width=80, height=80, preserveAspectRatio=True)
+            y_position = height - margin - logo_height - 20
+        except Exception as e:
+            print("Error al cargar el logo:", e)
+            y_position = height - margin - 20
+    else:
+        y_position = height - margin - 20
+
+    # Título y Datos del Paciente
+    c_pdf.setFont("Times-Bold", 18)
+    title_text = f"Informe Psicológico de {paciente[1]}"
+    wrapped_title = textwrap.wrap(title_text, width=60)
+    for line in wrapped_title:
+        c_pdf.drawCentredString(width/2, y_position, line)
+        y_position -= 22
+    y_position -= 10
+    c_pdf.line(margin, y_position, width - margin, y_position)
+    y_position -= 20
+
+    c_pdf.setFont("Times-Bold", 12)
+    c_pdf.drawString(margin, y_position, "Datos del Paciente:")
+    y_position -= 20
+    c_pdf.setFont("Times-Roman", 12)
+    datos = [
+        f"Nombre: {paciente[1]}",
+        f"Tipo de documento: {paciente[2]}",
+        f"Número de documento: {paciente[3]}",
+        f"Edad: {paciente[4]} años",
+        f"Género: {paciente[5]}",
+        f"Celular: {paciente[6]}",
+        f"Diagnóstico: {paciente[7]}",
+        f"Tratamiento: {paciente[8]}",
+        f"Estado de Terapia: {paciente[10]}"
+    ]
+    for line in datos:
+        c_pdf.drawString(margin + 20, y_position, line)
+        y_position -= 20
+
+    # Antecedentes
+    c_pdf.setFont("Times-Bold", 12)
+    c_pdf.drawString(margin, y_position, "Antecedentes:")
+    y_position -= 20
+    c_pdf.setFont("Times-Roman", 12)
+    antecedentes_clinicos = paciente[12] if paciente[12] and paciente[12].strip() != "" else "No registrado"
+    antecedentes_familiares = paciente[13] if paciente[13] and paciente[13].strip() != "" else "No registrado"
+    wrapped_clinicos = textwrap.wrap("Clínicos: " + antecedentes_clinicos, width=80)
+    for line in wrapped_clinicos:
+        c_pdf.drawString(margin + 20, y_position, line)
+        y_position -= 15
+    y_position -= 10
+    wrapped_familiares = textwrap.wrap("Familiares: " + antecedentes_familiares, width=80)
+    for line in wrapped_familiares:
+        c_pdf.drawString(margin + 20, y_position, line)
+        y_position -= 15
+    y_position -= 30
+
+    c_pdf.line(margin, y_position, width - margin, y_position)
+    y_position -= 30
+
+    # Sesiones
+    c_pdf.setFont("Times-Bold", 12)
+    c_pdf.drawString(margin, y_position, "Sesiones:")
+    y_position -= 20
+    c_pdf.setFont("Times-Roman", 12)
+    for sesion in sesiones:
+        if y_position < margin + 50:
+            c_pdf.showPage()
+            draw_header(c_pdf, width, height, margin)
+            y_position = height - margin - 20
+        c_pdf.setFont("Times-Bold", 12)
+        c_pdf.drawString(margin + 20, y_position, f"Asunto: {sesion[3]}")
+        y_position -= 15
+        c_pdf.drawString(margin + 20, y_position, f"Fecha: {sesion[2]}")
+        y_position -= 15
+        c_pdf.drawString(margin + 20, y_position, "Evolución:")
+        y_position -= 15
+        c_pdf.setFont("Times-Roman", 12)
+        wrapped_text = textwrap.wrap(sesion[4], width=90)
+        for line in wrapped_text:
+            c_pdf.drawString(margin + 40, y_position, line)
+            y_position -= 15
+        y_position -= 10
+    c_pdf.save()
+    try:
+        os.startfile(pdf_file)
+    except AttributeError:
+        if os.name == 'posix':
+            os.system(f"open {pdf_file}" if sys.platform == "darwin" else f"xdg-open {pdf_file}")
+    messagebox.showinfo("Éxito", f"Informe de Psicología generado: {pdf_file}")
+
+def exportar_csv():
+    file_path = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV files", "*.csv")])
+    if file_path:
+        with sqlite3.connect('historia_clinica.db') as conn:
+            c = conn.cursor()
+            c.execute("SELECT * FROM pacientes")
+            pacientes = c.fetchall()
+            if not pacientes:
+                messagebox.showwarning("Warning", "No hay pacientes para exportar.")
+                return
+            with open(file_path, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow(["ID", "Nombre", "Tipo de Documento", "Número de Documento", "Edad", "Género", "Celular", 
+                                 "Diagnóstico", "Tratamiento", "Acudiente", "Estado de Terapia", "Consentimiento", 
+                                 "Antecedentes Clínicos", "Antecedentes Familiares"])
+                writer.writerows(pacientes)
+        messagebox.showinfo("Éxito", "Datos exportados correctamente.")
+
+# =============================================================================
+# Funciones para cambio de pestañas (definidas antes de crear el header)
+# =============================================================================
+def mostrar_ingreso_paciente():
+    tab_ingresar.pack(fill="both", expand=True)
+    tab_consulta.pack_forget()
+    tab_agenda.pack_forget()
+    tab_sesiones.pack_forget()
+    tab_perfil.pack_forget()
+
+def mostrar_consulta_paciente():
+    tab_ingresar.pack_forget()
+    tab_consulta.pack(fill="both", expand=True)
+    tab_agenda.pack_forget()
+    tab_sesiones.pack_forget()
+    tab_perfil.pack_forget()
+
+def mostrar_agenda_pacientes():
+    tab_ingresar.pack_forget()
+    tab_consulta.pack_forget()
+    tab_agenda.pack(fill="both", expand=True)
+    tab_sesiones.pack_forget()
+    tab_perfil.pack_forget()
+
+def mostrar_sesiones():
+    tab_ingresar.pack_forget()
+    tab_consulta.pack_forget()
+    tab_agenda.pack_forget()
+    tab_sesiones.pack(fill="both", expand=True)
+    tab_perfil.pack_forget()
+    actualizar_combobox_pacientes()
+    actualizar_lista_sesiones()
+
+def mostrar_perfil():
+    tab_ingresar.pack_forget()
+    tab_consulta.pack_forget()
+    tab_agenda.pack_forget()
+    tab_sesiones.pack_forget()
+    tab_perfil.pack(fill="both", expand=True)
+
+# =============================================================================
+# Función para ver el consentimiento (abrir el PDF)
+# =============================================================================
+def ver_consentimiento():
+    item = tree.focus()
+    if item:
+        id_paciente = tree.item(item)['values'][0]
+        with sqlite3.connect('historia_clinica.db') as conn:
+            c = conn.cursor()
+            c.execute("SELECT consentimiento FROM pacientes WHERE id = ?", (id_paciente,))
+            result = c.fetchone()
+        if result and result[0]:
+            pdf_path = result[0]
+            try:
+                os.startfile(pdf_path)
+            except AttributeError:
+                if os.name == 'posix':
+                    os.system(f"open {pdf_path}" if sys.platform == "darwin" else f"xdg-open {pdf_path}")
+        else:
+            messagebox.showwarning("Nota", "No se encontró el consentimiento para este paciente.")
+    else:
+        messagebox.showwarning("Error", "Seleccione un paciente para ver el consentimiento.")
+
+# =============================================================================
+# Funciones para Pacientes, Citas y Sesiones (continuación)
+# =============================================================================
+def actualizar_combobox_pacientes():
+    with sqlite3.connect('historia_clinica.db') as conn:
+         c = conn.cursor()
+         c.execute("SELECT nombre FROM pacientes")
+         pacientes = c.fetchall()
+    if 'combo_pacientes' in globals():
+         combo_pacientes.configure(values=[p[0] for p in pacientes])
+    if 'combo_pacientes_sesiones' in globals():
+         combo_pacientes_sesiones.configure(values=[p[0] for p in pacientes])
+    if 'combo_pacientes_agenda' in globals():
+         combo_pacientes_agenda.configure(values=[p[0] for p in pacientes])
+    if 'combo_pacientes_antecedentes' in globals():
+         combo_pacientes_antecedentes.configure(values=[p[0] for p in pacientes])
+
+def agregar_paciente():
+    global consentimiento_file_path
+    nombres_apellidos = entry_nombres_apellidos.get()
+    tipo_documento = combo_tipo_documento.get()
+    numero_documento = entry_numero_documento.get()
+    edad = entry_edad.get()
+    genero = combo_genero.get()
+    celular = entry_celular.get()
+    diagnostico = entry_diagnostico.get()
+    tratamiento = entry_tratamiento.get()
+    acudiente = entry_acudiente.get() if es_menor_edad.get() else "N/A"
+    estado_terapia = combo_estado_terapia.get()  
+    if not validar_campos_paciente(nombres_apellidos, tipo_documento, numero_documento, edad, genero, celular, diagnostico, tratamiento, estado_terapia):
+         messagebox.showwarning("Error", "Todos los campos son obligatorios")
+         return
+    consentimiento_path = consentimiento_file_path if 'consentimiento_file_path' in globals() else None
+    try:
+         with sqlite3.connect('historia_clinica.db') as conn:
+              c = conn.cursor()
+              c.execute(
+                   "INSERT INTO pacientes (nombre, tipo_documento, numero_documento, edad, genero, celular, diagnostico, tratamiento, acudiente, estado_terapia, consentimiento) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                   (nombres_apellidos, tipo_documento, numero_documento, edad, genero, celular, diagnostico, tratamiento, acudiente, estado_terapia, consentimiento_path)
+              )
+              conn.commit()
+              messagebox.showinfo("Éxito", "Paciente agregado correctamente")
+              limpiar_campos()
+              actualizar_lista_pacientes()
+              actualizar_combobox_pacientes()
+    except sqlite3.Error as e:
+         messagebox.showerror("Error", f"Ocurrió un error al agregar el paciente a la base de datos: {e}")
+
+def limpiar_campos():
+    global consentimiento_file_path
+    entry_nombres_apellidos.delete(0, ctk.END)
+    combo_tipo_documento.set("")
+    entry_numero_documento.delete(0, ctk.END)
+    entry_edad.delete(0, ctk.END)
+    combo_genero.set("")
+    entry_celular.delete(0, ctk.END)
+    entry_diagnostico.delete(0, ctk.END)
+    entry_tratamiento.delete(0, ctk.END)
+    entry_acudiente.delete(0, ctk.END)
+    es_menor_edad.set(False)
+    combo_estado_terapia.set("")
+    consentimiento_file_path = None
+
+def cargar_consentimiento():
+    global consentimiento_file_path
+    consentimiento_file_path = filedialog.askopenfilename(filetypes=[("PDF files", "*.pdf"), ("Image files", "*.jpg;*.png")])
+    if consentimiento_file_path:
+         messagebox.showinfo("Éxito", "Consentimiento informado cargado correctamente")
+
+def actualizar_lista_pacientes():
+    for row in tree.get_children():
+         tree.delete(row)
+    with sqlite3.connect('historia_clinica.db') as conn:
+         c = conn.cursor()
+         c.execute("SELECT * FROM pacientes")
+         pacientes = c.fetchall()
+         for paciente in pacientes:
+              pac = list(paciente)
+              if pac[12] is None or str(pac[12]).strip() == "":
+                   pac[12] = "No registrado"
+              if pac[13] is None or str(pac[13]).strip() == "":
+                   pac[13] = "No registrado"
+              tree.insert("", ctk.END, values=tuple(pac) + ("Ver Consentimiento", "Ver Sesiones"))
+
+def buscar_paciente():
+    busqueda = entry_buscar.get()
+    tipo_busqueda = combo_tipo_busqueda.get()
+    query = "SELECT * FROM pacientes WHERE "
+    if tipo_busqueda == "Nombre":
+         query += "nombre LIKE ?"
+         parameters = (f"%{busqueda}%",)
+    elif tipo_busqueda == "Documento":
+         query += "numero_documento LIKE ?"
+         parameters = (f"%{busqueda}%",)
+    elif tipo_busqueda == "Celular":
+         query += "celular LIKE ?"
+         parameters = (f"%{busqueda}%",)
+    else:
+         query += "nombre LIKE ? OR numero_documento LIKE ? OR celular LIKE ?"
+         parameters = (f"%{busqueda}%", f"%{busqueda}%", f"%{busqueda}%")
+    with sqlite3.connect('historia_clinica.db') as conn:
+         c = conn.cursor()
+         c.execute(query, parameters)
+         pacientes = c.fetchall()
+         for row in tree.get_children():
+              tree.delete(row)
+         for paciente in pacientes:
+              pac = list(paciente)
+              if pac[12] is None or str(pac[12]).strip() == "":
+                   pac[12] = "No registrado"
+              if pac[13] is None or str(pac[13]).strip() == "":
+                   pac[13] = "No registrado"
+              tree.insert("", ctk.END, values=tuple(pac) + ("Ver Consentimiento", "Ver Sesiones"))
+    mostrar_evoluciones_del_paciente()
+
+def on_cell_click(event):
+    item = tree.focus()
+    if item:
+         mostrar_evoluciones_del_paciente()
+
+def mostrar_evoluciones_del_paciente():
+    for row in tree_evoluciones.get_children():
+         tree_evoluciones.delete(row)
+    item = tree.focus()
+    if item:
+         id_paciente = tree.item(item)['values'][0]
+         with sqlite3.connect('historia_clinica.db') as conn:
+              c = conn.cursor()
+              c.execute("SELECT * FROM sesiones WHERE paciente_id = ?", (id_paciente,))
+              evoluciones = c.fetchall()
+              for evolucion in evoluciones:
+                   tree_evoluciones.insert("", ctk.END, values=(evolucion[0], evolucion[2], evolucion[3], evolucion[4]))
+
+def ver_evoluciones_paciente():
+    mostrar_evoluciones_del_paciente()
+
+def mostrar_evolucion_completa(event):
+    if tree_sesiones.selection():
+         item = tree_sesiones.selection()[0]
+         evolucion = tree_sesiones.item(item, "values")[3]
+    elif tree_evoluciones.selection():
+         item = tree_evoluciones.selection()[0]
+         evolucion = tree_evoluciones.item(item, "values")[3]
+    else:
+         return
+    ventana_evolucion = Toplevel()
+    ventana_evolucion.title("Evolución Completa")
+    ventana_evolucion.geometry("400x300")
+    texto_evolucion = ctk.CTkTextbox(ventana_evolucion, wrap="word", width=380, height=280)
+    texto_evolucion.insert("1.0", evolucion)
+    texto_evolucion.configure(state="disabled")
+    texto_evolucion.pack(padx=10, pady=10)
+
+def eliminar_paciente():
+    seleccionado = tree.selection()
+    if seleccionado:
+         id_paciente = tree.item(seleccionado[0])['values'][0]
+         with sqlite3.connect('historia_clinica.db') as conn:
+              c = conn.cursor()
+              c.execute("DELETE FROM pacientes WHERE id = ?", (id_paciente,))
+              conn.commit()
+         messagebox.showinfo("Éxito", "Paciente eliminado correctamente")
+         actualizar_lista_pacientes()
+         actualizar_combobox_pacientes()
+    else:
+         messagebox.showwarning("Error", "Seleccione un paciente para eliminar")
+
+def eliminar_sesion():
+    seleccionado = tree_sesiones.selection()
+    if seleccionado:
+         id_sesion = tree_sesiones.item(seleccionado[0])['values'][0]
+         with sqlite3.connect('historia_clinica.db') as conn:
+              c = conn.cursor()
+              c.execute("DELETE FROM sesiones WHERE id = ?", (id_sesion,))
+              conn.commit()
+         messagebox.showinfo("Éxito", "Sesión eliminada correctamente")
+         actualizar_lista_sesiones()
+    else:
+         messagebox.showwarning("Error", "Seleccione una sesión para eliminar")
+
+def editar_paciente_ventana():
+    seleccion = tree.selection()
+    if not seleccion:
+         messagebox.showwarning("Error", "Seleccione un paciente para editar")
+         return
+    paciente = tree.item(seleccion[0])['values']
+    id_paciente    = paciente[0]
+    nombre         = paciente[1]
+    tipo_doc       = paciente[2]
+    num_doc        = paciente[3]
+    edad           = paciente[4]
+    genero         = paciente[5]
+    celular        = paciente[6]
+    diagnostico    = paciente[7]
+    tratamiento    = paciente[8]
+    acudiente      = paciente[9]
+    estado_terapia = paciente[10]
+    ventana_editar = Toplevel(root)
+    ventana_editar.title("Editar Paciente")
+    ventana_editar.geometry("500x600")
+    lbl_nombre = ctk.CTkLabel(ventana_editar, text="Nombres y Apellidos:")
+    lbl_nombre.grid(row=0, column=0, padx=10, pady=5, sticky="e")
+    entry_nombre = ctk.CTkEntry(ventana_editar)
+    entry_nombre.grid(row=0, column=1, padx=10, pady=5)
+    entry_nombre.insert(0, nombre)
+    lbl_tipo_doc = ctk.CTkLabel(ventana_editar, text="Tipo de Documento:")
+    lbl_tipo_doc.grid(row=1, column=0, padx=10, pady=5, sticky="e")
+    combo_tipo_doc = ctk.CTkComboBox(ventana_editar, values=["T.I", "C.C", "PPT", "C.E", "Otro"])
+    combo_tipo_doc.grid(row=1, column=1, padx=10, pady=5)
+    combo_tipo_doc.set(tipo_doc)
+    lbl_num_doc = ctk.CTkLabel(ventana_editar, text="Número de Documento:")
+    lbl_num_doc.grid(row=2, column=0, padx=10, pady=5, sticky="e")
+    entry_num_doc = ctk.CTkEntry(ventana_editar)
+    entry_num_doc.grid(row=2, column=1, padx=10, pady=5)
+    entry_num_doc.insert(0, num_doc)
+    lbl_edad = ctk.CTkLabel(ventana_editar, text="Edad:")
+    lbl_edad.grid(row=3, column=0, padx=10, pady=5, sticky="e")
+    entry_edad = ctk.CTkEntry(ventana_editar)
+    entry_edad.grid(row=3, column=1, padx=10, pady=5)
+    entry_edad.insert(0, edad)
+    lbl_genero = ctk.CTkLabel(ventana_editar, text="Género:")
+    lbl_genero.grid(row=4, column=0, padx=10, pady=5, sticky="e")
+    combo_genero = ctk.CTkComboBox(ventana_editar, values=["Masculino", "Femenino"])
+    combo_genero.grid(row=4, column=1, padx=10, pady=5)
+    combo_genero.set(genero)
+    lbl_celular = ctk.CTkLabel(ventana_editar, text="Celular:")
+    lbl_celular.grid(row=5, column=0, padx=10, pady=5, sticky="e")
+    entry_celular = ctk.CTkEntry(ventana_editar)
+    entry_celular.grid(row=5, column=1, padx=10, pady=5)
+    entry_celular.insert(0, celular)
+    lbl_diagnostico = ctk.CTkLabel(ventana_editar, text="Diagnóstico:")
+    lbl_diagnostico.grid(row=6, column=0, padx=10, pady=5, sticky="e")
+    entry_diagnostico = ctk.CTkEntry(ventana_editar)
+    entry_diagnostico.grid(row=6, column=1, padx=10, pady=5)
+    entry_diagnostico.insert(0, diagnostico)
+    lbl_tratamiento = ctk.CTkLabel(ventana_editar, text="Tratamiento:")
+    lbl_tratamiento.grid(row=7, column=0, padx=10, pady=5, sticky="e")
+    entry_tratamiento = ctk.CTkEntry(ventana_editar)
+    entry_tratamiento.grid(row=7, column=1, padx=10, pady=5)
+    entry_tratamiento.insert(0, tratamiento)
+    lbl_acudiente = ctk.CTkLabel(ventana_editar, text="Acudiente:")
+    lbl_acudiente.grid(row=8, column=0, padx=10, pady=5, sticky="e")
+    entry_acudiente = ctk.CTkEntry(ventana_editar)
+    entry_acudiente.grid(row=8, column=1, padx=10, pady=5)
+    entry_acudiente.insert(0, acudiente)
+    lbl_estado_terapia = ctk.CTkLabel(ventana_editar, text="Estado de Terapia:")
+    lbl_estado_terapia.grid(row=9, column=0, padx=10, pady=5, sticky="e")
+    combo_estado_terapia = ctk.CTkComboBox(ventana_editar, values=["Primera vez", "En progreso", "Terminó terapias"])
+    combo_estado_terapia.grid(row=9, column=1, padx=10, pady=5)
+    combo_estado_terapia.set(estado_terapia)
+    def guardar_cambios():
+         nuevo_nombre         = entry_nombre.get()
+         nuevo_tipo_doc       = combo_tipo_doc.get()
+         nuevo_num_doc        = entry_num_doc.get()
+         nueva_edad           = entry_edad.get()
+         nuevo_genero         = combo_genero.get()
+         nuevo_celular        = entry_celular.get()
+         nuevo_diagnostico    = entry_diagnostico.get()
+         nuevo_tratamiento    = entry_tratamiento.get()
+         nuevo_acudiente      = entry_acudiente.get()
+         nuevo_estado_terapia = combo_estado_terapia.get()
+         if not validar_campos_paciente(nuevo_nombre, nuevo_tipo_doc, nuevo_num_doc, nueva_edad, nuevo_genero, nuevo_celular, nuevo_diagnostico, nuevo_tratamiento, nuevo_estado_terapia):
+              messagebox.showwarning("Error", "Todos los campos son obligatorios")
+              return
+         try:
+              with sqlite3.connect('historia_clinica.db') as conn:
+                   c = conn.cursor()
+                   c.execute("""UPDATE pacientes 
+                                SET nombre = ?, tipo_documento = ?, numero_documento = ?, edad = ?, genero = ?, celular = ?, 
+                                    diagnostico = ?, tratamiento = ?, acudiente = ?, estado_terapia = ?
+                                WHERE id = ?""",
+                             (nuevo_nombre, nuevo_tipo_doc, nuevo_num_doc, nueva_edad, nuevo_genero, nuevo_celular,
+                              nuevo_diagnostico, nuevo_tratamiento, nuevo_acudiente, nuevo_estado_terapia, id_paciente))
+                   conn.commit()
+              messagebox.showinfo("Éxito", "Paciente actualizado correctamente")
+              ventana_editar.destroy()
+              actualizar_lista_pacientes()
+              actualizar_combobox_pacientes()
+         except sqlite3.Error as e:
+              messagebox.showerror("Error", f"Ocurrió un error al actualizar el paciente: {e}")
+    btn_guardar = ctk.CTkButton(ventana_editar, text="Guardar Cambios", command=guardar_cambios, fg_color="#4CAF50", hover_color="#45a049")
+    btn_guardar.grid(row=10, column=0, columnspan=2, pady=20)
+
+def adjuntar_consentimiento():
+    seleccion = tree.selection()
+    if not seleccion:
+         messagebox.showwarning("Error", "Seleccione un paciente para adjuntar el consentimiento.")
+         return
+    consent_path = filedialog.askopenfilename(filetypes=[("PDF files", "*.pdf"), ("Image files", "*.jpg;*.png")])
+    if consent_path:
+         id_paciente = tree.item(seleccion[0])['values'][0]
+         with sqlite3.connect('historia_clinica.db') as conn:
+              c = conn.cursor()
+              c.execute("UPDATE pacientes SET consentimiento = ? WHERE id = ?", (consent_path, id_paciente))
+              conn.commit()
+         messagebox.showinfo("Éxito", "Consentimiento adjuntado correctamente.")
+         actualizar_lista_pacientes()
+         actualizar_combobox_pacientes()
+
+# =============================================================================
+# Funciones para Citas (Agenda)
+# =============================================================================
+def agendar_cita():
+    paciente = combo_pacientes_agenda.get()
+    celular = entry_celular_cita_agenda.get()
+    fecha = calendario.get_date()
+    if not paciente or not celular:
+         messagebox.showwarning("Advertencia", "Por favor, complete todos los campos para agendar la cita.")
+         return
+    with sqlite3.connect('historia_clinica.db') as conn:
+         c = conn.cursor()
+         c.execute("INSERT INTO citas (fecha, paciente, celular, estado) VALUES (?, ?, ?, ?)", 
+                   (fecha, paciente, celular, "Agendada"))
+         conn.commit()
+    messagebox.showinfo("Éxito", "Cita agendada correctamente.")
+    actualizar_lista_citas()
+
+def actualizar_lista_citas():
+    for row in tree_citas.get_children():
+         tree_citas.delete(row)
+    with sqlite3.connect('historia_clinica.db') as conn:
+         c = conn.cursor()
+         c.execute("SELECT id, fecha, paciente, celular, estado FROM citas")
+         citas = c.fetchall()
+         for cita in citas:
+              state = cita[4].lower()
+              if state in ["agendada", "en progreso"]:
+                   tag = "agendada"
+              elif state == "aplazada":
+                   tag = "aplazada"
+              elif state == "cancelada":
+                   tag = "cancelada"
+              else:
+                   tag = ""
+              if tag:
+                   tree_citas.insert('', 'end', values=cita, tags=(tag,))
+              else:
+                   tree_citas.insert('', 'end', values=cita)
+
+def buscar_citas():
+    busqueda = entry_buscar_citas.get()
+    with sqlite3.connect('historia_clinica.db') as conn:
+         c = conn.cursor()
+         c.execute("SELECT * FROM citas WHERE paciente LIKE ? OR fecha LIKE ?", (f"%{busqueda}%", f"%{busqueda}%"))
+         citas = c.fetchall()
+         for row in tree_citas.get_children():
+              tree_citas.delete(row)
+         for cita in citas:
+              tree_citas.insert("", ctk.END, values=cita)
+            
+def cambiar_estado_cita(estado):
+    item = tree.item(tree.focus())
+    if not item or estado == "Seleccione":
+         messagebox.showwarning("Error", "Seleccione una cita y un estado válido.")
+         return
+    id_cita = tree.item(tree.focus())['values'][0]
+    with sqlite3.connect('historia_clinica.db') as conn:
+         c = conn.cursor()
+         if estado == "Eliminar":
+              c.execute("DELETE FROM citas WHERE id = ?", (id_cita,))
+              messagebox.showinfo("Éxito", "Cita eliminada correctamente.")
+         else:
+              c.execute("UPDATE citas SET estado = ? WHERE id = ?", (estado, id_cita))
+              messagebox.showinfo("Éxito", f"Cita marcada como {estado}.")
+         conn.commit()
+    actualizar_lista_citas()
+
+# =============================================================================
+# Funciones para Sesiones
+# =============================================================================
+def agregar_sesion():
+    paciente_nombre = combo_pacientes_sesiones.get()
+    asunto = entry_asunto.get("1.0", ctk.END).strip()  
+    evolucion = entry_evolucion.get("1.0", ctk.END).strip()  
+    if paciente_nombre and asunto and evolucion:
+         with sqlite3.connect('historia_clinica.db') as conn:
+              c = conn.cursor()
+              c.execute("SELECT id FROM pacientes WHERE nombre = ?", (paciente_nombre,))
+              paciente_id = c.fetchone()
+              if paciente_id:
+                   c.execute("INSERT INTO sesiones (paciente_id, fecha, asunto, evolucion) VALUES (?, ?, ?, ?)",
+                             (paciente_id[0], datetime.now().strftime("%Y-%m-%d %H:%M:%S"), asunto, evolucion))
+                   conn.commit()
+                   messagebox.showinfo("Éxito", "Sesión registrada correctamente")
+                   entry_asunto.delete("1.0", ctk.END)
+                   entry_evolucion.delete("1.0", ctk.END)
+                   actualizar_lista_sesiones()
+              else:
+                   messagebox.showwarning("Error", "No se encontró el paciente.")
+    else:
+         messagebox.showwarning("Error", "Seleccione un paciente e ingrese el asunto y evolución para la sesión")
+
+def actualizar_lista_sesiones():
+    for row in tree_sesiones.get_children():
+         tree_sesiones.delete(row)
+    paciente_nombre = combo_pacientes_sesiones.get()
+    if paciente_nombre:
+         with sqlite3.connect('historia_clinica.db') as conn:
+              c = conn.cursor()
+              c.execute("SELECT id FROM pacientes WHERE nombre = ?", (paciente_nombre,))
+              paciente_id = c.fetchone()
+              if paciente_id:
+                   c.execute("SELECT * FROM sesiones WHERE paciente_id = ? ORDER BY fecha DESC", (paciente_id[0],))
+                   sesiones = c.fetchall()
+                   for sesion in sesiones:
+                        tree_sesiones.insert("", ctk.END, values=(sesion[0], sesion[2], sesion[3], sesion[4]))
+
+# =============================================================================
+# NUEVAS FUNCIONES PARA LA SECCIÓN DE ANTECEDENTES (Filtro de búsqueda)
+# =============================================================================
+def filtrar_pacientes_antecedentes():
+    filtro = entry_buscar_antecedentes.get()
+    with sqlite3.connect('historia_clinica.db') as conn:
+         c = conn.cursor()
+         c.execute("SELECT nombre FROM pacientes WHERE nombre LIKE ?", (f"%{filtro}%",))
+         resultados = c.fetchall()
+    nombres = [r[0] for r in resultados]
+    combo_pacientes_antecedentes.configure(values=nombres)
+    if nombres:
+         combo_pacientes_antecedentes.set(nombres[0])
+    else:
+         combo_pacientes_antecedentes.set("Paciente")
+
+def guardar_antecedentes():
+    paciente = combo_pacientes_antecedentes.get()
+    antecedentes_clinicos = text_antecedentes_clinicos.get("1.0", "end").strip()
+    antecedentes_familiares = text_antecedentes_familiares.get("1.0", "end").strip()
+    if not paciente or paciente == "Paciente":
+         messagebox.showwarning("Error", "Seleccione un paciente.")
+         return
+    if not antecedentes_clinicos and not antecedentes_familiares:
+         messagebox.showwarning("Error", "Ingrese los antecedentes clínicos o familiares.")
+         return
+    with sqlite3.connect('historia_clinica.db') as conn:
+         c = conn.cursor()
+         c.execute("SELECT id FROM pacientes WHERE nombre = ?", (paciente,))
+         result = c.fetchone()
+         if not result:
+              messagebox.showerror("Error", "Paciente no encontrado.")
+              return
+         id_paciente = result[0]
+         c.execute("UPDATE pacientes SET antecedentes_clinicos = ?, antecedentes_familiares = ? WHERE id = ?", 
+                   (antecedentes_clinicos, antecedentes_familiares, id_paciente))
+         conn.commit()
+    messagebox.showinfo("Éxito", "Antecedentes guardados correctamente.")
+
+# =============================================================================
+# NUEVAS FUNCIONES PARA EL PERFIL DEL PROFESIONAL
+# =============================================================================
+# Función para adjuntar sello profesional
+def adjuntar_sello():
+    global global_sello_path
+    path = filedialog.askopenfilename(filetypes=[("Image files", "*.jpg;*.png")])
+    if path:
+         global_sello_path = path
+         try:
+              sello_img = Image.open(path)
+              sello_img = sello_img.resize((100, 100), Image.Resampling.LANCZOS)
+              sello_ctk = ctk.CTkImage(sello_img, size=(100, 100))
+              label_sello.configure(image=sello_ctk, text="")
+              label_sello.image = sello_ctk
+         except Exception as e:
+              messagebox.showerror("Error", f"No se pudo cargar el sello: {e}")
+
+# Función para adjuntar firma digital
+def adjuntar_firma():
+    global global_firma_path
+    path = filedialog.askopenfilename(filetypes=[("Image files", "*.jpg;*.png")])
+    if path:
+         global_firma_path = path
+         try:
+              firma_img = Image.open(path)
+              firma_img = firma_img.resize((100, 50), Image.Resampling.LANCZOS)
+              firma_ctk = ctk.CTkImage(firma_img, size=(100, 50))
+              label_firma.configure(image=firma_ctk, text="")
+              label_firma.image = firma_ctk
+         except Exception as e:
+              messagebox.showerror("Error", f"No se pudo cargar la firma: {e}")
+
+def guardar_perfil():
+    # Datos profesionales
+    nombre = entry_nombre_prof.get()
+    tarjeta = entry_tarjeta.get()
+    especializacion = entry_especializacion.get()
+    sello_path = global_sello_path if 'global_sello_path' in globals() else ""
+    firma_path = global_firma_path if 'global_firma_path' in globals() else ""
+    # Datos de la IPS
+    ips_nombre = entry_ips_nombre.get()
+    ips_nit = entry_ips_nit.get()
+    ips_direccion = entry_ips_direccion.get()
+    ips_tel = entry_ips_tel.get()
+    ips_correo = entry_ips_correo.get()
+    with sqlite3.connect('historia_clinica.db') as conn:
+         c = conn.cursor()
+         c.execute("SELECT id FROM perfil")
+         result = c.fetchone()
+         if result:
+              c.execute("""UPDATE perfil SET 
+                          nombre = ?, tarjeta_profesional = ?, especializacion = ?, sello_profesional = ?, firma_digital = ?,
+                          ips_nombre = ?, ips_nit = ?, ips_direccion = ?, ips_tel = ?, ips_correo = ?
+                          WHERE id = ?""",
+                        (nombre, tarjeta, especializacion, sello_path, firma_path,
+                         ips_nombre, ips_nit, ips_direccion, ips_tel, ips_correo, result[0]))
+         else:
+              c.execute("""INSERT INTO perfil (nombre, tarjeta_profesional, especializacion, sello_profesional, firma_digital,
+                          ips_nombre, ips_nit, ips_direccion, ips_tel, ips_correo)
+                          VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                        (nombre, tarjeta, especializacion, sello_path, firma_path,
+                         ips_nombre, ips_nit, ips_direccion, ips_tel, ips_correo))
+         conn.commit()
+    messagebox.showinfo("Éxito", "Perfil guardado correctamente.")
+
+def cargar_perfil():
+    with sqlite3.connect('historia_clinica.db') as conn:
+         c = conn.cursor()
+         c.execute("SELECT * FROM perfil")
+         result = c.fetchone()
+    if result:
+         # Datos profesionales
+         entry_nombre_prof.delete(0, ctk.END)
+         entry_nombre_prof.insert(0, result[1] if result[1] else "")
+         entry_tarjeta.delete(0, ctk.END)
+         entry_tarjeta.insert(0, result[2] if result[2] else "")
+         entry_especializacion.delete(0, ctk.END)
+         entry_especializacion.insert(0, result[3] if result[3] else "")
+         global global_sello_path
+         global_sello_path = result[4] if result[4] else ""
+         if global_sello_path and os.path.exists(global_sello_path):
+              sello_img = Image.open(global_sello_path)
+              sello_img = sello_img.resize((100, 100), Image.Resampling.LANCZOS)
+              sello_ctk = ctk.CTkImage(sello_img, size=(100, 100))
+              label_sello.configure(image=sello_ctk, text="")
+              label_sello.image = sello_ctk
+         else:
+              label_sello.configure(text="No adjuntado", image="")
+         global global_firma_path
+         global_firma_path = result[5] if result[5] else ""
+         if global_firma_path and os.path.exists(global_firma_path):
+              firma_img = Image.open(global_firma_path)
+              firma_img = firma_img.resize((100, 50), Image.Resampling.LANCZOS)
+              firma_ctk = ctk.CTkImage(firma_img, size=(100, 50))
+              label_firma.configure(image=firma_ctk, text="")
+              label_firma.image = firma_ctk
+         else:
+              label_firma.configure(text="No adjuntado", image="")
+         # Datos de la IPS
+         entry_ips_nombre.delete(0, ctk.END)
+         entry_ips_nombre.insert(0, result[6] if result[6] else "")
+         entry_ips_nit.delete(0, ctk.END)
+         entry_ips_nit.insert(0, result[7] if result[7] else "")
+         entry_ips_direccion.delete(0, ctk.END)
+         entry_ips_direccion.insert(0, result[8] if result[8] else "")
+         entry_ips_tel.delete(0, ctk.END)
+         entry_ips_tel.insert(0, result[9] if result[9] else "")
+         entry_ips_correo.delete(0, ctk.END)
+         entry_ips_correo.insert(0, result[10] if result[10] else "")
+    else:
+         messagebox.showinfo("Información", "No hay perfil registrado.")
+
+# =============================================================================
+# Función para ver el consentimiento (abrir el PDF)
+# =============================================================================
+def ver_consentimiento():
+    item = tree.focus()
+    if item:
+        id_paciente = tree.item(item)['values'][0]
+        with sqlite3.connect('historia_clinica.db') as conn:
+            c = conn.cursor()
+            c.execute("SELECT consentimiento FROM pacientes WHERE id = ?", (id_paciente,))
+            result = c.fetchone()
+        if result and result[0]:
+            pdf_path = result[0]
+            try:
+                os.startfile(pdf_path)
+            except AttributeError:
+                if os.name == 'posix':
+                    os.system(f"open {pdf_path}" if sys.platform == "darwin" else f"xdg-open {pdf_path}")
+        else:
+            messagebox.showwarning("Nota", "No se encontró el consentimiento para este paciente.")
+    else:
+        messagebox.showwarning("Error", "Seleccione un paciente para ver el consentimiento.")
+
+# =============================================================================
+# Creación de la Ventana Principal y sus Pestañas
+# =============================================================================
+root = ctk.CTk()
+root.title("Psipam - Gestión de Historias Clínicas")
+root.geometry("1200x800")
+
+# Configuración de estilos para el Treeview
+style = ttk.Style()
+style.configure("Treeview", font=("Arial", 12))
+style.configure("Treeview.Heading", font=("Arial", 12, "bold"))
+
+# Cargar imágenes
+try:
+    logo_image = Image.open("logo_de_psipam.jpg")
+    logo_image = logo_image.resize((100, 100), Image.Resampling.LANCZOS)
+    logo_ctk_image = ctk.CTkImage(logo_image, size=(100, 100))
+except FileNotFoundError:
+    print("Advertencia: No se encontró el logo 'logo_de_psipam.jpg'.")
+    logo_ctk_image = None
+
+try:
+    imagen_ingreso = ImageTk.PhotoImage(Image.open("salud_mental_ingreso.jpg").resize((400, 400)))
+except FileNotFoundError:
+    print("Advertencia: No se encontró la imagen 'salud_mental_ingreso.jpg'.")
+    imagen_ingreso = None
+
+try:
+    imagen_consulta = ImageTk.PhotoImage(Image.open("salud_mental_consulta.jpg").resize((400, 400)))
+except FileNotFoundError:
+    print("Advertencia: No se encontró la imagen 'salud_mental_consulta.jpg'.")
+    imagen_consulta = None
+
+try:
+    imagen_agenda = ImageTk.PhotoImage(Image.open("salud_mental_agenda.jpg").resize((400, 400)))
+except FileNotFoundError:
+    print("Advertencia: No se encontró la imagen 'salud_mental_agenda.jpg'.")
+    imagen_agenda = None
+
+try:
+    imagen_sesiones = ImageTk.PhotoImage(Image.open("salud_mental_sesiones.jpg").resize((400, 400)))
+except FileNotFoundError:
+    print("Advertencia: No se encontró la imagen 'salud_mental_sesiones.jpg'.")
+    imagen_sesiones = None
+
+# =============================================================================
+# Encabezado y Botones de Navegación
+# =============================================================================
+header_frame = ctk.CTkFrame(root)
+header_frame.pack(pady=10, padx=10, fill="x")
+if logo_ctk_image:
+    logo_label = ctk.CTkLabel(header_frame, image=logo_ctk_image, text="")
+    logo_label.pack(side="left", padx=10, pady=10)
+program_name_label = ctk.CTkLabel(header_frame, text="Psipam", font=("Arial", 24, "bold"))
+program_name_label.pack(side="left", padx=10, pady=10)
+# Botón de Perfil Profesional con estilo único
+btn_perfil = ctk.CTkButton(header_frame, text="Perfil Profesional", command=mostrar_perfil,
+                           fg_color="#FF6F61", hover_color="#FF8F81", text_color="white",
+                           corner_radius=15, font=("Helvetica", 16, "bold"))
+btn_perfil.pack(side="right", padx=20, pady=10)
+
+button_frame = ctk.CTkFrame(root)
+button_frame.pack(pady=10)
+btn_ingreso = ctk.CTkButton(button_frame, text="Ingreso de Paciente", command=mostrar_ingreso_paciente, fg_color="#4CAF50", hover_color="#45a049")
+btn_ingreso.pack(side=ctk.LEFT, padx=10)
+btn_sesiones = ctk.CTkButton(button_frame, text="Sesiones", command=mostrar_sesiones, fg_color="#9C27B0", hover_color="#8e24aa")
+btn_sesiones.pack(side=ctk.LEFT, padx=10)
+btn_consulta = ctk.CTkButton(button_frame, text="Consulta de Paciente", command=mostrar_consulta_paciente, fg_color="#2196F3", hover_color="#1e88e5")
+btn_consulta.pack(side=ctk.LEFT, padx=10)
+btn_agenda = ctk.CTkButton(button_frame, text="Agenda de Pacientes", command=mostrar_agenda_pacientes, fg_color="#FF9800", hover_color="#fb8c00")
+btn_agenda.pack(side=ctk.LEFT, padx=10)
+btn_exportar = ctk.CTkButton(button_frame, text="Exportar CSV", command=exportar_csv, fg_color="#607D8B", hover_color="#546E7A")
+btn_exportar.pack(side=ctk.LEFT, padx=10)
+
+# =============================================================================
+# Creación de las Pestañas
+# =============================================================================
+tab_ingresar = ctk.CTkFrame(root)
+tab_consulta = ctk.CTkFrame(root)
+tab_agenda = ctk.CTkFrame(root)
+tab_sesiones = ctk.CTkFrame(root)
+tab_perfil = ctk.CTkFrame(root)
+
+# =============================================================================
+# Pestaña 1: Ingreso de Paciente con sección de Antecedentes y Filtro de Búsqueda
+# =============================================================================
+container_frame = ctk.CTkFrame(tab_ingresar)
+container_frame.pack(pady=20, padx=20, fill="both", expand=True)
+container_frame.grid_columnconfigure(0, weight=1)
+container_frame.grid_columnconfigure(1, weight=1)
+
+# Panel Izquierdo: Formulario de Ingreso de Paciente
+form_frame = ctk.CTkFrame(container_frame)
+form_frame.grid(row=0, column=0, sticky="nsew", padx=(0,10))
+ctk.CTkLabel(form_frame, text="Ingreso de Paciente", font=("Arial", 18)).grid(row=0, column=0, columnspan=2, pady=10)
+campos = [
+    ("Nombres y Apellidos:", entry_nombres_apellidos := ctk.CTkEntry(form_frame)),
+    ("Tipo de Documento:", combo_tipo_documento := ctk.CTkComboBox(form_frame, values=["T.I", "C.C", "PPT", "C.E", "Otro"])),
+    ("Número de Documento:", entry_numero_documento := ctk.CTkEntry(form_frame)),
+    ("Edad:", entry_edad := ctk.CTkEntry(form_frame)),
+    ("Género:", combo_genero := ctk.CTkComboBox(form_frame, values=["Masculino", "Femenino"])),
+    ("Celular:", entry_celular := ctk.CTkEntry(form_frame)),
+    ("Diagnóstico:", entry_diagnostico := ctk.CTkEntry(form_frame)),
+    ("Tratamiento:", entry_tratamiento := ctk.CTkEntry(form_frame))
+]
+for i, (label_text, entry) in enumerate(campos):
+    ctk.CTkLabel(form_frame, text=label_text).grid(row=i+1, column=0, padx=10, pady=5, sticky="e")
+    entry.grid(row=i+1, column=1, padx=10, pady=5, sticky="w")
+es_menor_edad = ctk.BooleanVar()
+checkbox_menor_edad = ctk.CTkCheckBox(form_frame, text="¿Es menor de edad?", variable=es_menor_edad)
+checkbox_menor_edad.grid(row=len(campos)+1, column=0, columnspan=2, pady=5)
+ctk.CTkLabel(form_frame, text="Acudiente:").grid(row=len(campos)+2, column=0, padx=10, pady=5, sticky="e")
+entry_acudiente = ctk.CTkEntry(form_frame)
+entry_acudiente.grid(row=len(campos)+2, column=1, padx=10, pady=5, sticky="w")
+entry_acudiente.grid_remove()
+def toggle_acudiente():
+    if es_menor_edad.get():
+         entry_acudiente.grid()
+    else:
+         entry_acudiente.delete(0, ctk.END)
+         entry_acudiente.grid_remove()
+checkbox_menor_edad.configure(command=toggle_acudiente)
+ctk.CTkLabel(form_frame, text="Estado de Terapia:").grid(row=len(campos)+3, column=0, padx=10, pady=5, sticky="e")
+combo_estado_terapia = ctk.CTkComboBox(form_frame, values=["Primera vez", "En progreso", "Terminó terapias"])
+combo_estado_terapia.grid(row=len(campos)+3, column=1, padx=10, pady=5, sticky="w")
+button_agregar = ctk.CTkButton(form_frame, text="Agregar Paciente", command=agregar_paciente, fg_color="#4CAF50", hover_color="#45a049")
+button_agregar.grid(row=len(campos)+5, column=0, pady=10)
+button_cargar_consentimiento = ctk.CTkButton(form_frame, text="Cargar Consentimiento Informado", command=cargar_consentimiento)
+button_cargar_consentimiento.grid(row=len(campos)+5, column=1, pady=10)
+
+# Panel Derecho: Antecedentes y Filtro de Búsqueda
+antecedentes_frame = ctk.CTkFrame(container_frame)
+antecedentes_frame.grid(row=0, column=1, sticky="nsew", padx=(10,0))
+ctk.CTkLabel(antecedentes_frame, text="Antecedentes del Paciente", font=("Arial", 18)).grid(row=0, column=0, columnspan=2, pady=10)
+ctk.CTkLabel(antecedentes_frame, text="Buscar Paciente:").grid(row=1, column=0, padx=5, pady=5, sticky="e")
+entry_buscar_antecedentes = ctk.CTkEntry(antecedentes_frame)
+entry_buscar_antecedentes.grid(row=1, column=1, padx=5, pady=5, sticky="w")
+entry_buscar_antecedentes.bind("<KeyRelease>", lambda event: filtrar_pacientes_antecedentes())
+ctk.CTkLabel(antecedentes_frame, text="Paciente:").grid(row=2, column=0, padx=5, pady=5, sticky="e")
+combo_pacientes_antecedentes = ctk.CTkComboBox(antecedentes_frame, values=[])
+combo_pacientes_antecedentes.grid(row=2, column=1, padx=5, pady=5, sticky="w")
+combo_pacientes_antecedentes.set("Paciente")
+ctk.CTkLabel(antecedentes_frame, text="Antecedentes Clínicos:").grid(row=3, column=0, padx=5, pady=5, sticky="ne")
+text_antecedentes_clinicos = ctk.CTkTextbox(antecedentes_frame, width=300, height=150)
+text_antecedentes_clinicos.grid(row=3, column=1, padx=5, pady=5, sticky="w")
+ctk.CTkLabel(antecedentes_frame, text="Antecedentes Familiares:").grid(row=4, column=0, padx=5, pady=5, sticky="ne")
+text_antecedentes_familiares = ctk.CTkTextbox(antecedentes_frame, width=300, height=150)
+text_antecedentes_familiares.grid(row=4, column=1, padx=5, pady=5, sticky="w")
+btn_guardar_antecedentes = ctk.CTkButton(antecedentes_frame, text="Guardar Antecedentes", command=guardar_antecedentes, fg_color="#4CAF50", hover_color="#45a049")
+btn_guardar_antecedentes.grid(row=5, column=0, columnspan=2, pady=10)
+
+# =============================================================================
+# Pestaña 2: Consulta de Paciente
+# =============================================================================
+ctk.CTkLabel(tab_consulta, text="Consulta de Pacientes", font=("Arial", 18)).grid(row=0, column=0, columnspan=2, pady=10)
+if imagen_consulta:
+    imagen_label_consulta = ctk.CTkLabel(tab_consulta, image=imagen_consulta, text="")
+    imagen_label_consulta.grid(row=1, column=2, rowspan=4, padx=20, pady=10)
+frame_busqueda = ctk.CTkFrame(tab_consulta)
+frame_busqueda.grid(row=1, column=0, columnspan=2, pady=10, padx=20, sticky="ew")
+ctk.CTkLabel(frame_busqueda, text="Buscar por:").pack(side="left", padx=5)
+combo_tipo_busqueda = ctk.CTkComboBox(frame_busqueda, values=["Nombre", "Documento", "Celular", "Todos"])
+combo_tipo_busqueda.pack(side="left", padx=5)
+combo_tipo_busqueda.set("Nombre")
+entry_buscar = ctk.CTkEntry(frame_busqueda)
+entry_buscar.pack(side="left", padx=5, fill="x", expand=True)
+ctk.CTkButton(frame_busqueda, text="Buscar", command=buscar_paciente, fg_color="#2196F3", hover_color="#1e88e5").pack(side="left", padx=5)
+columns = ("ID", "Nombre", "Tipo de Documento", "Número de Documento", "Edad", "Género", "Celular", 
+           "Diagnóstico", "Tratamiento", "Acudiente", "Estado de Terapia", "Consentimiento", 
+           "Antecedentes Clínicos", "Antecedentes Familiares", "Acción 1", "Acción 2")
+tree = ttk.Treeview(tab_consulta, columns=columns, show="headings")
+for col in columns:
+    tree.heading(col, text=col)
+    if col == "Nombre":
+         tree.column(col, width=200, anchor="w")
+    else:
+         tree.column(col, width=100, anchor="center")
+tree.grid(row=2, column=0, columnspan=2, padx=20, pady=10, sticky="nsew")
+tree.bind("<ButtonRelease-1>", on_cell_click)
+ctk.CTkLabel(tab_consulta, text="Evoluciones del Paciente", font=("Arial", 18)).grid(row=5, column=0, columnspan=2, pady=10)
+columns_evoluciones = ("ID", "Fecha", "Asunto", "Evolución")
+tree_evoluciones = ttk.Treeview(tab_consulta, columns=columns_evoluciones, show="headings")
+for col in columns_evoluciones:
+    tree_evoluciones.heading(col, text=col)
+    tree_evoluciones.column(col, width=100, anchor="center")
+tree_evoluciones.grid(row=6, column=0, columnspan=2, padx=20, pady=10, sticky="nsew")
+tree_evoluciones.bind("<Double-1>", mostrar_evolucion_completa)
+frame_botones = ctk.CTkFrame(tab_consulta)
+frame_botones.grid(row=4, column=0, columnspan=2, pady=10)
+ctk.CTkButton(frame_botones, text="Ver Consentimiento", command=lambda: ver_consentimiento(), fg_color="#4CAF50", hover_color="#45a049").pack(side="left", padx=5)
+ctk.CTkButton(frame_botones, text="Adjuntar Consentimiento", command=adjuntar_consentimiento, fg_color="#3b83bd", hover_color="#3b83bd").pack(side="left", padx=5)
+ctk.CTkButton(frame_botones, text="Editar Paciente", command=editar_paciente_ventana, fg_color="#FF9800", hover_color="#fb8c00").pack(side="left", padx=5)
+ctk.CTkButton(frame_botones, text="Eliminar Paciente", command=eliminar_paciente, fg_color="#F44336", hover_color="#e53935").pack(side="left", padx=5)
+ctk.CTkButton(frame_botones, text="Ver Sesiones", command=mostrar_evoluciones_del_paciente, fg_color="#9C27B0", hover_color="#8e24aa").pack(side="left", padx=5)
+ctk.CTkButton(frame_botones, text="Generar Historia Clínica pdf", command=generar_historia_clinica, fg_color="#c51d34", hover_color="#c51d30", font=("Arial", 14, "bold")).pack(side="left", padx=5)
+
+# =============================================================================
+# Pestaña 3: Agenda de Pacientes
+# =============================================================================
+frame_calendario = ctk.CTkFrame(tab_agenda)
+frame_calendario.grid(row=0, column=0, padx=20, pady=20, sticky="nsew")
+ctk.CTkLabel(frame_calendario, text="Calendario", font=("Arial", 16, "bold")).pack(pady=10)
+hoy = datetime.today()
+calendario = Calendar(frame_calendario, selectmode="day", year=hoy.year, month=hoy.month, day=hoy.day,
+                      date_pattern="yyyy-mm-dd", font=("Arial", 14), width=300, height=300)
+calendario.pack(fill="both", expand=True, padx=10, pady=10)
+frame_centro = ctk.CTkFrame(tab_agenda)
+frame_centro.grid(row=0, column=1, padx=20, pady=20, sticky="nsew")
+frame_centro.grid_rowconfigure(3, weight=1)
+ctk.CTkLabel(frame_centro, text="Agendar Cita", font=("Arial", 16, "bold")).grid(row=0, column=0, columnspan=2, pady=(0,10))
+ctk.CTkLabel(frame_centro, text="Paciente:").grid(row=1, column=0, padx=5, pady=5, sticky="e")
+combo_pacientes_agenda = ctk.CTkComboBox(frame_centro, values=[])
+combo_pacientes_agenda.grid(row=1, column=1, padx=5, pady=5, sticky="w")
+ctk.CTkLabel(frame_centro, text="Celular:").grid(row=2, column=0, padx=5, pady=5, sticky="e")
+entry_celular_cita_agenda = ctk.CTkEntry(frame_centro)
+entry_celular_cita_agenda.grid(row=2, column=1, padx=5, pady=5, sticky="w")
+btn_frame = ctk.CTkFrame(frame_centro)
+btn_frame.grid(row=3, column=0, columnspan=2, pady=10, sticky="ew")
+btn_frame.grid_columnconfigure((0,1), weight=1)
+ctk.CTkButton(btn_frame, text="Agendar Cita", command=agendar_cita, fg_color="#4CAF50", hover_color="#45a049").grid(row=0, column=0, padx=5, pady=5, sticky="ew")
+ctk.CTkButton(btn_frame, text="Limpiar Campos", command=lambda: [entry_celular_cita_agenda.delete(0, 'end'), combo_pacientes_agenda.set('')], fg_color="#607D8B", hover_color="#546E7A").grid(row=0, column=1, padx=5, pady=5, sticky="ew")
+accion_frame = ctk.CTkFrame(frame_centro)
+accion_frame.grid(row=4, column=0, columnspan=2, pady=20, sticky="ew")
+accion_frame.grid_columnconfigure((0,1,2), weight=1)
+ctk.CTkLabel(accion_frame, text="Cambiar Estado de Cita:").grid(row=0, column=0, padx=5, pady=5, sticky="e")
+combo_estado_cita = ctk.CTkComboBox(accion_frame, values=["Seleccione", "Aplazar", "En progreso", "Cancelada", "Eliminar"])
+combo_estado_cita.grid(row=0, column=1, padx=5, pady=5, sticky="w")
+ctk.CTkButton(accion_frame, text="Aplicar", command=lambda: cambiar_estado_cita(combo_estado_cita.get()),
+              fg_color="#FF9800", hover_color="#fb8c00").grid(row=0, column=2, padx=5, pady=5, sticky="ew")
+frame_derecha = ctk.CTkFrame(tab_agenda, width=300)
+frame_derecha.grid(row=0, column=2, padx=20, pady=20, sticky="ne")
+ctk.CTkLabel(frame_derecha, text="Listado de Citas", font=("Arial", 16, "bold")).pack(pady=10)
+columns_citas = ("ID", "Fecha", "Paciente", "Celular", "Estado")
+tree_citas = ttk.Treeview(frame_derecha, columns=columns_citas, show="headings", selectmode="browse")
+for col in columns_citas:
+    tree_citas.heading(col, text=col)
+    tree_citas.column(col, width=100, anchor="center")
+tree_citas.pack(fill="both", expand=True, padx=10, pady=10)
+tree_citas.tag_configure("agendada", background="#00C853", foreground="white")
+tree_citas.tag_configure("aplazada", background="#FF5722", foreground="white")
+tree_citas.tag_configure("cancelada", background="#F44336", foreground="white")
+
+# =============================================================================
+# Pestaña 4: Sesiones
+# =============================================================================
+ctk.CTkLabel(tab_sesiones, text="Sesiones", font=("Arial", 18)).grid(row=0, column=0, columnspan=2, pady=10)
+frame_sesiones = ctk.CTkFrame(tab_sesiones)
+frame_sesiones.grid(row=1, column=0, columnspan=2, pady=10, padx=20, sticky="nsew")
+ctk.CTkLabel(frame_sesiones, text="Seleccionar Paciente:").grid(row=0, column=0, padx=5, pady=5)
+combo_pacientes_sesiones = ctk.CTkComboBox(frame_sesiones, values=[])
+combo_pacientes_sesiones.grid(row=0, column=1, padx=5, pady=5)
+ctk.CTkLabel(frame_sesiones, text="Asunto de la Sesión:").grid(row=1, column=0, padx=5, pady=5)
+entry_asunto = ctk.CTkTextbox(frame_sesiones, width=400, height=30)
+entry_asunto.grid(row=1, column=1, padx=5, pady=5)
+ctk.CTkLabel(frame_sesiones, text="Evolución:").grid(row=2, column=0, padx=5, pady=5)
+entry_evolucion = ctk.CTkTextbox(frame_sesiones, width=400, height=180)
+entry_evolucion.grid(row=2, column=1, padx=5, pady=5)
+ctk.CTkButton(frame_sesiones, text="Agregar Sesión", command=agregar_sesion, fg_color="#9C27B0", hover_color="#8e24aa").grid(row=3, column=0, columnspan=2, pady=10)
+frame_botones_sesiones = ctk.CTkFrame(tab_sesiones)
+frame_botones_sesiones.grid(row=2, column=0, columnspan=2, pady=10)
+btn_eliminar_sesion = ctk.CTkButton(frame_botones_sesiones, text="Eliminar Sesión", command=eliminar_sesion, fg_color="#F44336", hover_color="#e53935")
+btn_eliminar_sesion.pack(side="left", padx=10)
+btn_actualizar_evoluciones = ctk.CTkButton(frame_botones_sesiones, text="Actualizar Evoluciones", command=actualizar_lista_sesiones, fg_color="#2196F3", hover_color="#1e88e5")
+btn_actualizar_evoluciones.pack(side="left", padx=10)
+frame_tabla_sesiones = ctk.CTkFrame(tab_sesiones)
+frame_tabla_sesiones.grid(row=1, column=2, rowspan=4, padx=20, sticky="nsew")
+columns_sesiones = ("ID", "Fecha", "Asunto", "Evolución")
+tree_sesiones = ttk.Treeview(frame_tabla_sesiones, columns=columns_sesiones, show="headings")
+tree_sesiones.heading("ID", text="ID")
+tree_sesiones.heading("Fecha", text="Fecha")
+tree_sesiones.heading("Asunto", text="Asunto")
+tree_sesiones.heading("Evolución", text="Evolución")
+tree_sesiones.column("ID", width=50, anchor="center")
+tree_sesiones.column("Fecha", width=100, anchor="center")
+tree_sesiones.column("Asunto", width=200, anchor="w")
+tree_sesiones.column("Evolución", width=300, anchor="w")
+tree_sesiones.grid(row=0, column=0, padx=20, pady=10, sticky="nsew")
+scrollbar_y = ttk.Scrollbar(frame_tabla_sesiones, orient="vertical", command=tree_sesiones.yview)
+tree_sesiones.configure(yscroll=scrollbar_y.set)
+scrollbar_y.grid(row=0, column=1, sticky='ns')
+frame_tabla_sesiones.grid_rowconfigure(0, weight=1)
+tree_sesiones.bind("<Double-1>", mostrar_evolucion_completa)
+
+# =============================================================================
+# Pestaña 5: Perfil Profesional
+# =============================================================================
+# =============================================================================
+# Pestaña 5: Perfil Profesional (Versión Mejorada con Campos Opcionales)
+# =============================================================================
+ctk.CTkLabel(tab_perfil, text="Perfil Profesional", font=("Arial", 20, "bold")).pack(pady=10)
+
+# Contenedor principal dividido en dos columnas
+perfil_main_frame = ctk.CTkFrame(tab_perfil)
+perfil_main_frame.pack(pady=10, padx=10, fill="both", expand=True)
+perfil_main_frame.grid_columnconfigure(0, weight=1)
+perfil_main_frame.grid_columnconfigure(1, weight=1)
+
+# --- Columna 1: Datos Profesionales ---
+datos_prof_frame = ctk.CTkFrame(perfil_main_frame)
+datos_prof_frame.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
+
+ctk.CTkLabel(datos_prof_frame, text="Datos Profesionales", font=("Arial", 16, "bold")).grid(row=0, column=0, columnspan=4, pady=5)
+
+ctk.CTkLabel(datos_prof_frame, text="Nombre del Profesional:").grid(row=1, column=0, padx=10, pady=5, sticky="e")
+entry_nombre_prof = ctk.CTkEntry(datos_prof_frame)
+entry_nombre_prof.grid(row=1, column=1, padx=10, pady=5, sticky="w")
+
+ctk.CTkLabel(datos_prof_frame, text="Tarjeta Profesional:").grid(row=2, column=0, padx=10, pady=5, sticky="e")
+entry_tarjeta = ctk.CTkEntry(datos_prof_frame)
+entry_tarjeta.grid(row=2, column=1, padx=10, pady=5, sticky="w")
+
+# Campo opcional: Especialización (se indica con placeholder)
+ctk.CTkLabel(datos_prof_frame, text="Especialización:").grid(row=3, column=0, padx=10, pady=5, sticky="e")
+entry_especializacion = ctk.CTkEntry(datos_prof_frame, placeholder_text="Opcional")
+entry_especializacion.grid(row=3, column=1, padx=10, pady=5, sticky="w")
+
+# Sello Profesional
+ctk.CTkLabel(datos_prof_frame, text="Sello Profesional:").grid(row=4, column=0, padx=10, pady=5, sticky="e")
+label_sello = ctk.CTkLabel(datos_prof_frame, text="No adjuntado")
+label_sello.grid(row=4, column=1, padx=10, pady=5, sticky="w")
+btn_adjuntar_sello = ctk.CTkButton(datos_prof_frame, text="Adjuntar Sello", command=adjuntar_sello, fg_color="#3b83bd", hover_color="#3b83bd")
+btn_adjuntar_sello.grid(row=4, column=2, padx=5, pady=5)
+btn_remover_sello = ctk.CTkButton(datos_prof_frame, text="Quitar Sello", command=lambda: remover_sello(), fg_color="#E91E63", hover_color="#EC407A")
+btn_remover_sello.grid(row=4, column=3, padx=5, pady=5)
+
+# Firma Digital
+ctk.CTkLabel(datos_prof_frame, text="Firma Digital:").grid(row=5, column=0, padx=10, pady=5, sticky="e")
+label_firma = ctk.CTkLabel(datos_prof_frame, text="No adjuntado")
+label_firma.grid(row=5, column=1, padx=10, pady=5, sticky="w")
+btn_adjuntar_firma = ctk.CTkButton(datos_prof_frame, text="Adjuntar Firma", command=adjuntar_firma, fg_color="#3b83bd", hover_color="#3b83bd")
+btn_adjuntar_firma.grid(row=5, column=2, padx=5, pady=5)
+btn_remover_firma = ctk.CTkButton(datos_prof_frame, text="Quitar Firma", command=lambda: remover_firma(), fg_color="#E91E63", hover_color="#EC407A")
+btn_remover_firma.grid(row=5, column=3, padx=5, pady=5)
+
+# --- Columna 2: Datos de la IPS (Opcionales) ---
+ips_frame = ctk.CTkFrame(perfil_main_frame)
+ips_frame.grid(row=0, column=1, padx=10, pady=10, sticky="nsew")
+
+ctk.CTkLabel(ips_frame, text="Datos de la IPS", font=("Arial", 16, "bold")).grid(row=0, column=0, columnspan=2, pady=5)
+
+ctk.CTkLabel(ips_frame, text="Nombre de la IPS:").grid(row=1, column=0, padx=10, pady=5, sticky="e")
+entry_ips_nombre = ctk.CTkEntry(ips_frame, placeholder_text="Opcional")
+entry_ips_nombre.grid(row=1, column=1, padx=10, pady=5, sticky="w")
+
+ctk.CTkLabel(ips_frame, text="NIT:").grid(row=2, column=0, padx=10, pady=5, sticky="e")
+entry_ips_nit = ctk.CTkEntry(ips_frame, placeholder_text="Opcional")
+entry_ips_nit.grid(row=2, column=1, padx=10, pady=5, sticky="w")
+
+ctk.CTkLabel(ips_frame, text="Dirección:").grid(row=3, column=0, padx=10, pady=5, sticky="e")
+entry_ips_direccion = ctk.CTkEntry(ips_frame, placeholder_text="Opcional")
+entry_ips_direccion.grid(row=3, column=1, padx=10, pady=5, sticky="w")
+
+ctk.CTkLabel(ips_frame, text="Teléfono:").grid(row=4, column=0, padx=10, pady=5, sticky="e")
+entry_ips_tel = ctk.CTkEntry(ips_frame, placeholder_text="Opcional")
+entry_ips_tel.grid(row=4, column=1, padx=10, pady=5, sticky="w")
+
+ctk.CTkLabel(ips_frame, text="Correo:").grid(row=5, column=0, padx=10, pady=5, sticky="e")
+entry_ips_correo = ctk.CTkEntry(ips_frame, placeholder_text="Opcional")
+entry_ips_correo.grid(row=5, column=1, padx=10, pady=5, sticky="w")
+
+# --- Botones generales para el perfil ---
+btn_guardar_perfil = ctk.CTkButton(tab_perfil, text="Guardar Perfil", command=lambda: (validar_campos_perfil() and guardar_perfil()), fg_color="#4CAF50", hover_color="#45a049")
+btn_guardar_perfil.pack(pady=5)
+btn_cargar_perfil = ctk.CTkButton(tab_perfil, text="Cargar Perfil", command=cargar_perfil, fg_color="#2196F3", hover_color="#1e88e5")
+btn_cargar_perfil.pack(pady=5)
+btn_limpiar_perfil = ctk.CTkButton(tab_perfil, text="Limpiar Campos", command=lambda: limpiar_campos_perfil(), fg_color="#607D8B", hover_color="#546E7A")
+btn_limpiar_perfil.pack(pady=5)
+
+# --- Funciones adicionales para el perfil ---
+def validar_campos_perfil():
+    # Solo se valida que el nombre y la tarjeta profesional sean obligatorios
+    if not entry_nombre_prof.get().strip():
+        messagebox.showwarning("Validación", "Ingrese el nombre del profesional.")
+        return False
+    if not entry_tarjeta.get().strip():
+        messagebox.showwarning("Validación", "Ingrese la tarjeta profesional.")
+        return False
+    return True
+
+def limpiar_campos_perfil():
+    entry_nombre_prof.delete(0, ctk.END)
+    entry_tarjeta.delete(0, ctk.END)
+    entry_especializacion.delete(0, ctk.END)
+    remover_sello()
+    remover_firma()
+    entry_ips_nombre.delete(0, ctk.END)
+    entry_ips_nit.delete(0, ctk.END)
+    entry_ips_direccion.delete(0, ctk.END)
+    entry_ips_tel.delete(0, ctk.END)
+    entry_ips_correo.delete(0, ctk.END)
+
+def remover_sello():
+    global global_sello_path
+    global_sello_path = ""
+    label_sello.configure(text="No adjuntado", image="")
+    label_sello.image = None
+
+def remover_firma():
+    global global_firma_path
+    global_firma_path = ""
+    label_firma.configure(text="No adjuntado", image="")
+    label_firma.image = None
+
+# =============================================================================
+# Inicialización de la Base de Datos y Actualización de Listados
+# =============================================================================
+crear_base_datos()
+actualizar_estructura_citas()
+actualizar_estructura_pacientes_antecedentes()
+mostrar_ingreso_paciente()  # Pestaña de Ingreso por defecto
+actualizar_lista_pacientes()
+actualizar_combobox_pacientes()
+actualizar_lista_citas()
+
+# Iniciar el bucle principal
+root.mainloop()
